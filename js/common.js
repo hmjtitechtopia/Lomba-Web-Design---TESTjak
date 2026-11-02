@@ -1,0 +1,606 @@
+(function () {
+  "use strict";
+
+  // Basis path: beranda di akar memakai "", halaman lain memakai "../".
+  const BASE = document.body.dataset.base !== undefined ? document.body.dataset.base : "../";
+
+  // Kunci dan status penyimpanan lokal untuk akun demo.
+  const SESSION_KEY = "arsipPusaka:session";
+  const toastElement = document.querySelector("#site-toast");
+  let toastTimer;
+
+  // Pesan singkat untuk memberi umpan balik pada aksi pengguna.
+  function notify(message, tone) {
+    if (!toastElement) return;
+    toastElement.textContent = message;
+    toastElement.hidden = false;
+    toastElement.dataset.tone = tone || "info";
+    window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(function () {
+      toastElement.hidden = true;
+    }, 4400);
+  }
+
+  function read(key, fallback) {
+    try {
+      const raw = window.localStorage.getItem(key);
+      return raw === null ? fallback : JSON.parse(raw);
+    } catch (error) {
+      console.error("Tidak dapat membaca penyimpanan lokal Arsip Pusaka.", error);
+      notify("Data lokal tidak dapat dibaca. Periksa pengaturan penyimpanan browser.", "error");
+      return fallback;
+    }
+  }
+
+  function write(key, value) {
+    try {
+      window.localStorage.setItem(key, JSON.stringify(value));
+      return true;
+    } catch (error) {
+      console.error("Tidak dapat menyimpan data lokal Arsip Pusaka.", error);
+      notify("Data tidak tersimpan. Periksa ruang penyimpanan atau izin browser.", "error");
+      return false;
+    }
+  }
+
+  function accountKey(prefix, username) {
+    return prefix + ":" + String(username || "").toLowerCase();
+  }
+
+  function getSession() {
+    const session = read(SESSION_KEY, null);
+    return session && typeof session.username === "string" ? session : null;
+  }
+
+  function updateAccountControls() {
+    const session = getSession();
+    document.querySelectorAll("[data-account-control]").forEach(function (button) {
+      if (session) {
+        button.innerHTML = '<img class="account-avatar" src="' + BASE + 'aset/logo_login.svg" alt="Akun @' + session.username + '" width="24" height="24">';
+        button.classList.add("site-nav__account--logged-in");
+      } else {
+        button.textContent = "Masuk";
+        button.classList.remove("site-nav__account--logged-in");
+      }
+      button.setAttribute("aria-label", session ? "Keluar dari akun @" + session.username : "Masuk ke akun demo");
+    });
+    document.dispatchEvent(new CustomEvent("arsip:authchange", { detail: { session: session } }));
+  }
+
+  function getPageMascot() {
+    const page = document.body.dataset.page || "beranda";
+    if (page === "kuis") return BASE + "MASKOT/kuis.png";
+    if (page === "cerita") return BASE + "MASKOT/cerita.png";
+    return BASE + "MASKOT/arsip.png";
+  }
+
+  let confirmResolver = null;
+
+  function askConfirm(options) {
+    return new Promise(function (resolve) {
+      confirmResolver = resolve;
+      const dialog = document.querySelector("#confirm-dialog");
+      if (!dialog) {
+        resolve(window.confirm(options.message || "Apakah Anda yakin?"));
+        return;
+      }
+      const titleEl = document.querySelector("#confirm-dialog-title");
+      const msgEl = document.querySelector("#confirm-dialog-message");
+      const hintEl = document.querySelector("#confirm-dialog-hint");
+      const mascotEl = document.querySelector("#confirm-dialog-mascot");
+      const okBtn = document.querySelector("#confirm-dialog-ok");
+      const cancelBtn = document.querySelector("#confirm-dialog-cancel");
+
+      if (titleEl) titleEl.textContent = options.title || "Konfirmasi";
+      if (msgEl) {
+        if (options.user) {
+          msgEl.innerHTML = "Keluar dari akun demo <strong>@" + options.user + "</strong>?";
+        } else if (options.message) {
+          msgEl.textContent = options.message;
+        } else {
+          msgEl.textContent = "Apakah Anda yakin?";
+        }
+      }
+      if (hintEl) {
+        hintEl.textContent = options.hint || "";
+        hintEl.hidden = !options.hint;
+      }
+      if (mascotEl) {
+        mascotEl.src = options.mascot || getPageMascot();
+      }
+      if (okBtn) {
+        okBtn.textContent = options.okText || "Ya, lanjutkan";
+        if (options.tone === "danger") {
+          okBtn.className = "button button--danger confirm-dialog__btn-ok";
+        } else {
+          okBtn.className = "button button--gold confirm-dialog__btn-ok";
+        }
+      }
+      if (cancelBtn) {
+        cancelBtn.textContent = options.cancelText || "Batal";
+      }
+
+      if (!dialog.open) {
+        dialog.showModal();
+        if (okBtn) okBtn.focus();
+      }
+    });
+  }
+
+  function accountDialog(showForm) {
+    const dialog = document.querySelector("#account-dialog");
+    const form = document.querySelector("#account-form");
+    const signedIn = document.querySelector("#account-signed-in");
+    const session = getSession();
+    document.querySelector("#account-dialog-title").textContent = session ? "Akun demo" : "Masuk ke Arsip Pusaka";
+    form.hidden = Boolean(session) || !showForm;
+    signedIn.hidden = !session;
+    document.querySelector("#account-dialog-error").textContent = "";
+    if (session) {
+      document.querySelector("#signed-in-name").textContent = "@" + session.username;
+    }
+    if (!dialog.open) dialog.showModal();
+  }
+
+  function requireAccount(message) {
+    if (getSession()) return true;
+    if (message) notify(message, "info");
+    accountDialog(true);
+    return false;
+  }
+
+  // Header, footer, dialog akun, dan chatbot dipasang bersama di setiap halaman.
+  function mountChrome() {
+    const header = document.querySelector("#site-header");
+    const footer = document.querySelector("#site-footer");
+    const overlays = document.querySelector("#site-overlays");
+    const page = document.body.dataset.page || "beranda";
+    // Path markup bersama mengikuti lokasi halaman: akar proyek atau subfolder.
+    function scope(markup) {
+      return markup.replace(/\.\.\//g, BASE);
+    }
+    if (header) {
+      header.innerHTML = scope(
+        '<header class="site-header"><div class="shell site-header__inner">' +
+        '<a class="brand" href="../index.html" aria-label="Arsip Pusaka, Beranda"><img class="brand__mark" src="../LOGO.png" alt=""><span class="brand__text"><span class="brand__name">ARSIP PUSAKA</span><span class="brand__tagline">Kenali · Catat · Wariskan</span></span></a>' +
+        '<button class="site-nav__toggle" id="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Buka navigasi">☰</button>' +
+        '<nav class="site-nav" id="site-nav" aria-label="Navigasi utama" data-open="false">' +
+        '<a class="site-nav__link" href="../index.html" ' + (page === "beranda" ? 'aria-current="page"' : "") + '>Beranda</a>' +
+        '<a class="site-nav__link" href="../arsip/index.html" ' + (page === "arsip" ? 'aria-current="page"' : "") + '>Arsip</a>' +
+        '<a class="site-nav__link" href="../kuis/index.html" ' + (page === "kuis" ? 'aria-current="page"' : "") + '>Kuis</a>' +
+        '<a class="site-nav__link" href="../cerita/index.html" ' + (page === "cerita" ? 'aria-current="page"' : "") + '>Cerita</a>' +
+        '<button class="site-nav__account" type="button" data-account-control>Masuk</button></nav></div></header>');
+    }
+    if (footer) {
+      footer.innerHTML = scope(
+        '<footer class="site-footer"><div class="shell site-footer__inner">' +
+        '<section><h2>Arsip Pusaka</h2><p>Rawat yang kita warisi. Wariskan yang kita rawat. Dokumentasikan budaya dengan sumber, konteks, dan izin yang jelas.</p></section>' +
+        '<section><h2>Jelajahi</h2><ul><li><a href="../index.html">Beranda</a></li><li><a href="../arsip/index.html">Arsip komunitas</a></li><li><a href="../kuis/index.html">Kuis budaya</a></li><li><a href="../cerita/index.html">Cerita Nusantara</a></li></ul></section>' +
+        '<section><h2>Catatan prototipe</h2><p>Akun, metadata arsip, skor, penanda baca, dan peringkat adalah demo lokal di browser ini. Contoh bukan data komunitas nyata; statistik dan sumber khusus perlu diverifikasi sebelum publikasi.</p></section>' +
+        '</div><div class="shell site-footer__bottom"><span>© 2026 Arsip Pusaka · TECHTOPIA Vol. 2</span><span>Pendidikan Berbasis Lokal · Warisan Budaya & Seni</span></div></footer>');
+    }
+    if (overlays) {
+      overlays.innerHTML = scope(
+        '<dialog id="account-dialog" aria-labelledby="account-dialog-title"><div class="dialog__inner">' +
+        '<div class="dialog__head"><h2 id="account-dialog-title">Masuk ke Arsip Pusaka</h2><button class="dialog__close" type="button" data-close-account aria-label="Tutup">×</button></div>' +
+        '<p class="dialog__copy">Akun demo menghubungkan unggahan dan skor pada perangkat ini saja. Kata sandi hanya pajangan: tidak dikirim dan tidak disimpan.</p>' +
+        '<form id="account-form" autocomplete="off"><div class="form-grid"><div class="field field--full"><label for="account-username">Nama pengguna</label><input id="account-username" name="username" type="text" minlength="3" maxlength="20" pattern="[A-Za-z0-9_]{3,20}" autocomplete="username" required aria-describedby="account-name-hint"><span class="field__hint" id="account-name-hint">3–20 karakter: huruf, angka, atau garis bawah.</span></div><div class="field field--full"><label for="account-password">Kata sandi demo</label><input id="account-password" name="password" type="password" autocomplete="off" required><span class="field__hint">Kolom ini tidak pernah disimpan atau dikirim.</span></div></div><p id="account-dialog-error" class="status-message" role="alert"></p><div class="form-actions"><button class="button button--gold" type="submit">Masuk</button><button class="button button--quiet" type="button" data-close-account>Batal</button></div></form>' +
+        '<div id="account-signed-in" hidden><p class="account-state">Sedang masuk sebagai <span class="account-state__name" id="signed-in-name"></span>.</p><p class="field__hint">Sesi demo berlaku di browser ini. Tidak ada akun server.</p></div>' +
+        '</div></dialog>' +
+        '<dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-dialog-title" aria-modal="true"><div class="confirm-dialog__inner">' +
+        '<button class="dialog__close confirm-dialog__close" type="button" data-confirm-cancel aria-label="Tutup">×</button>' +
+        '<div class="confirm-dialog__mascot-wrap"><img id="confirm-dialog-mascot" class="confirm-dialog__mascot" src="../MASKOT/arsip.png" alt="Maskot Arsip Pusaka" width="220" height="120"></div>' +
+        '<div class="confirm-dialog__body"><h2 id="confirm-dialog-title" class="confirm-dialog__title">Keluar dari akun demo?</h2>' +
+        '<p id="confirm-dialog-message" class="confirm-dialog__message"></p>' +
+        '<p id="confirm-dialog-hint" class="confirm-dialog__hint"></p></div>' +
+        '<div class="confirm-dialog__actions"><button class="button button--gold confirm-dialog__btn-ok" id="confirm-dialog-ok" type="button">Ya, Keluar</button>' +
+        '<button class="button button--quiet confirm-dialog__btn-cancel" id="confirm-dialog-cancel" type="button" data-confirm-cancel>Batal</button></div>' +
+        '</div></dialog>' +
+        '<button class="chat-launcher" id="chat-launcher" type="button" aria-label="Buka Tanya Pusaka Bot" aria-expanded="false" aria-controls="chat-panel"><img class="chat-launcher__mark" src="../MASKOT/AI_CHATBOT.png" alt="" aria-hidden="true"></button>' +
+        '<section class="chat-panel" id="chat-panel" aria-labelledby="chat-title" hidden><header class="chat-panel__head"><div><h2 id="chat-title">Tanya Pusaka Bot</h2><p>Jawaban berbasis pengetahuan situs ini, bukan AI umum.</p></div><button class="chat-panel__close" id="chat-close" type="button" aria-label="Tutup chatbot">×</button></header>' +
+        '<div class="chat-messages" id="chat-messages" aria-live="polite"><div class="chat-message" role="article">Halo! Tanyakan tentang budaya, cara mengarsipkan, kuis, atau cerita.</div></div><div class="chat-suggestions" id="chat-suggestions"></div>' +
+        '<form class="chat-form" id="chat-form"><label class="screen-reader-only" for="chat-input">Tulis pertanyaan</label><input id="chat-input" type="text" maxlength="240" placeholder="Tulis pertanyaan…" autocomplete="off" required><button type="submit">Kirim</button></form></section>');
+    }
+  }
+
+  // Tautan jawaban bot mengikuti halaman asal: akar ("") atau subfolder ("../").
+  function chatHref(href) {
+    if (!href) return null;
+    if (/^(https?:|mailto:|#)/.test(href)) return href;
+    return BASE + href.replace(/^\.\//, "");
+  }
+
+  function appendChatMessage(text, kind, link, meta) {
+    const messages = document.querySelector("#chat-messages");
+    const bubble = document.createElement("div");
+    bubble.className = "chat-message" + (kind === "user" ? " chat-message--user" : "");
+    bubble.setAttribute("role", kind === "bot" ? "article" : "status");
+    bubble.append(document.createTextNode(text));
+    if (link && link.href && link.label) {
+      bubble.append(document.createTextNode(" "));
+      const anchor = document.createElement("a");
+      anchor.href = chatHref(link.href);
+      anchor.textContent = link.label;
+      bubble.append(anchor);
+    }
+    // Sumber dan status verifikasi ditampilkan kecil di bawah jawaban.
+    if (meta && meta.source) {
+      const source = document.createElement("span");
+      source.className = "chat-message__source";
+      source.textContent = "Sumber: " + meta.source + (meta.verif === false ? " · perlu dicek ulang" : "");
+      bubble.append(source);
+    }
+    messages.append(bubble);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  // Jawaban chatbot berasal dari mesin aturan lokal (chatbot-engine.js) dan
+  // basis pengetahuan (chatbot-data.js). Tidak ada API maupun AI generatif.
+  const BOT_FALLBACK = "Maaf, saya belum paham pertanyaan itu. Coba tanyakan tentang cara mengunggah dokumen, kuis, cerita rakyat, klaim budaya, pengakuan UNESCO, atau budaya seperti Batik, Angklung, Reog, dan Pendet.";
+
+  function botAnswer(question) {
+    if (typeof jawab !== "function") {
+      return { text: BOT_FALLBACK, link: null, source: "", verif: true, suggestions: [] };
+    }
+    const result = jawab(question);
+    return {
+      text: result.jawaban,
+      link: result.tautan,
+      source: result.sumber,
+      verif: result.verif,
+      suggestions: result.saran || []
+    };
+  }
+
+  function botTopic(id) {
+    if (typeof KB === "undefined") return null;
+    const entry = KB.find(function (item) { return item.id === id; });
+    return entry ? { id: entry.id, topik: entry.topik } : null;
+  }
+
+  function starterSuggestions() {
+    if (typeof SARAN_AWAL === "undefined") return [];
+    return SARAN_AWAL.map(botTopic).filter(Boolean);
+  }
+
+  // Tombol saran diisi topik dari basis pengetahuan, bukan teks bebas.
+  function renderChatSuggestions(items) {
+    const box = document.querySelector("#chat-suggestions");
+    if (!box) return;
+    box.replaceChildren();
+    (items || []).forEach(function (item) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "chat-suggestion";
+      button.textContent = item.topik;
+      button.addEventListener("click", function () { askTopic(item); });
+      box.append(button);
+    });
+  }
+
+  // Menjawab langsung dari id entri agar tombol saran selalu memberi jawaban tepat.
+  function askTopic(item) {
+    appendChatMessage(item.topik, "user");
+    const result = typeof jawabById === "function" ? jawabById(item.id) : null;
+    if (!result) {
+      appendChatMessage(BOT_FALLBACK, "bot");
+      return;
+    }
+    appendChatMessage(result.jawaban, "bot", result.tautan, { source: result.sumber, verif: result.verif });
+    renderChatSuggestions(result.saran || []);
+  }
+
+  function initChatbot() {
+    const launcher = document.querySelector("#chat-launcher");
+    const panel = document.querySelector("#chat-panel");
+    const close = document.querySelector("#chat-close");
+    const form = document.querySelector("#chat-form");
+    const input = document.querySelector("#chat-input");
+    if (!launcher || !panel || !form) return;
+
+    renderChatSuggestions(starterSuggestions());
+
+    launcher.addEventListener("click", function () {
+      panel.hidden = !panel.hidden;
+      launcher.setAttribute("aria-expanded", String(!panel.hidden));
+      if (!panel.hidden) input.focus();
+    });
+    close.addEventListener("click", function () {
+      panel.hidden = true;
+      launcher.setAttribute("aria-expanded", "false");
+      launcher.focus();
+    });
+    form.addEventListener("submit", function (event) {
+      event.preventDefault();
+      const question = input.value.trim();
+      if (!question) {
+        input.focus();
+        return;
+      }
+      appendChatMessage(question, "user");
+      input.value = "";
+      const answer = botAnswer(question);
+      appendChatMessage(answer.text, "bot", answer.link, { source: answer.source, verif: answer.verif });
+      renderChatSuggestions(answer.suggestions);
+    });
+  }
+
+  // Animasi dimulai saat elemen memasuki viewport; konten baru ikut diamati.
+  function initScrollReveals() {
+    const revealSelector = [
+      ".hero__eyebrow",
+      ".hero__title",
+      ".hero__lead",
+      ".hero__actions",
+      ".page-hero__copy",
+      "main .section-heading",
+      "main .stats",
+      "main .case",
+      "main .process-showcase__copy",
+      "main .process-step",
+      "main .feature-showcase__copy",
+      "main .feature-item",
+      "main .source-list li",
+      "main .source-note",
+      "main .archive-toolbar",
+      "main .content-toolbar",
+      "main .filter-list",
+      "main .archive-card",
+      "main .empty-state",
+      "main .form-panel",
+      "main .quiz-intro",
+      "main .quiz-stage",
+      "main .quiz-result",
+      "main .leaderboard",
+      "main .story-card",
+      "main .story-callout",
+      "#site-footer .site-footer__inner > section",
+      "#site-footer .site-footer__bottom"
+    ].join(", ");
+    const main = document.querySelector("main");
+    const prefersReducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!("IntersectionObserver" in window) || prefersReducedMotion) return;
+
+    document.body.dataset.scrollReveal = "true";
+    const revealObserver = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add("is-visible");
+        revealObserver.unobserve(entry.target);
+      });
+    }, { threshold: 0.08, rootMargin: "0px 0px -8% 0px" });
+
+    function observeRevealTargets(root) {
+      if (root.matches && root.matches(revealSelector)) {
+        root.classList.add("scroll-reveal");
+        revealObserver.observe(root);
+      }
+      if (!root.querySelectorAll) return;
+      root.querySelectorAll(revealSelector).forEach(function (element) {
+        element.classList.add("scroll-reveal");
+        revealObserver.observe(element);
+      });
+    }
+
+    observeRevealTargets(document);
+    if (main && "MutationObserver" in window) {
+      const contentObserver = new MutationObserver(function (mutations) {
+        mutations.forEach(function (mutation) {
+          mutation.addedNodes.forEach(function (node) {
+            if (node.nodeType === Node.ELEMENT_NODE) observeRevealTargets(node);
+          });
+        });
+      });
+      contentObserver.observe(main, { childList: true, subtree: true });
+    }
+  }
+
+  // Angka statistik dihitung saat bagian statistik masuk ke viewport.
+  function initStatCounters() {
+    const stats = document.querySelector(".stats");
+    const counters = stats ? Array.from(stats.querySelectorAll(".stat__value[data-count]")) : [];
+    const prefersReducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!stats || !counters.length || prefersReducedMotion || !("IntersectionObserver" in window)) return;
+
+    const formatter = new Intl.NumberFormat("id-ID");
+    let animationFrame = 0;
+    let animationId = 0;
+    const observer = new IntersectionObserver(function (entries) {
+      if (!entries.some(function (entry) { return entry.isIntersecting; })) return;
+
+      animationId += 1;
+      const currentAnimationId = animationId;
+      if (animationFrame) window.cancelAnimationFrame(animationFrame);
+      const duration = 1500;
+      const startedAt = performance.now();
+      const targets = counters.map(function (counter) {
+        return Number(counter.dataset.count);
+      });
+
+      function updateCounters(now) {
+        if (currentAnimationId !== animationId) return;
+        const progress = Math.min((now - startedAt) / duration, 1);
+        const easedProgress = 1 - Math.pow(1 - progress, 4);
+        counters.forEach(function (counter, index) {
+          counter.textContent = formatter.format(Math.round(targets[index] * easedProgress));
+        });
+        if (progress < 1) {
+          animationFrame = window.requestAnimationFrame(updateCounters);
+        } else {
+          animationFrame = 0;
+        }
+      }
+
+      counters.forEach(function (counter) { counter.textContent = "0"; });
+      animationFrame = window.requestAnimationFrame(updateCounters);
+    }, { threshold: 0.3 });
+
+    observer.observe(stats);
+  }
+
+  // Titik masuk fitur bersama setelah elemen HTML tersedia.
+  function initApp() {
+    mountChrome();
+    initScrollReveals();
+    initStatCounters();
+
+    // Navigasi responsif dan status header saat halaman digulir.
+    function updateNavigationState() {
+      document.body.dataset.navScrolled = String(window.scrollY > 28);
+    }
+    updateNavigationState();
+    window.addEventListener("scroll", updateNavigationState, { passive: true });
+
+    const menuButton = document.querySelector("#nav-toggle");
+    const nav = document.querySelector("#site-nav");
+    if (menuButton && nav) {
+      menuButton.addEventListener("click", function () {
+        const open = nav.dataset.open !== "true";
+        nav.dataset.open = String(open);
+        menuButton.setAttribute("aria-expanded", String(open));
+      });
+      nav.querySelectorAll("a, button").forEach(function (link) {
+        link.addEventListener("click", function () {
+          nav.dataset.open = "false";
+          menuButton.setAttribute("aria-expanded", "false");
+        });
+      });
+    }
+
+    // Aksi login/logout menggunakan sesi demo yang hanya tersimpan di browser.
+    document.querySelectorAll("[data-account-control]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        if (getSession()) {
+          const session = getSession();
+          askConfirm({
+            title: "Keluar dari Akun?",
+            user: session.username,
+            hint: "Metadata arsip dan riwayat kuis tetap tersimpan di perangkat ini.",
+            okText: "Ya, Keluar",
+            cancelText: "Batal",
+            mascot: getPageMascot()
+          }).then(function (confirmed) {
+            if (!confirmed) return;
+            try {
+              window.localStorage.removeItem(SESSION_KEY);
+            } catch (error) {
+              console.error("Tidak dapat menghapus sesi lokal Arsip Pusaka.", error);
+              notify("Sesi tidak dapat dihapus. Periksa izin penyimpanan browser.", "error");
+              return;
+            }
+            updateAccountControls();
+            notify("Anda telah keluar dari akun demo.", "success");
+          });
+        } else {
+          accountDialog(true);
+        }
+      });
+    });
+
+    // Event listener dialog konfirmasi maskot
+    const confirmDialogEl = document.querySelector("#confirm-dialog");
+    const confirmOkBtn = document.querySelector("#confirm-dialog-ok");
+    if (confirmDialogEl) {
+      if (confirmOkBtn) {
+        confirmOkBtn.addEventListener("click", function () {
+          confirmDialogEl.close();
+          if (confirmResolver) {
+            confirmResolver(true);
+            confirmResolver = null;
+          }
+        });
+      }
+      confirmDialogEl.querySelectorAll("[data-confirm-cancel]").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          confirmDialogEl.close();
+        });
+      });
+      confirmDialogEl.addEventListener("close", function () {
+        if (confirmResolver) {
+          confirmResolver(false);
+          confirmResolver = null;
+        }
+      });
+      confirmDialogEl.addEventListener("click", function (event) {
+        if (event.target === confirmDialogEl) {
+          confirmDialogEl.close();
+        }
+      });
+    }
+
+    document.querySelectorAll("[data-close-account]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        document.querySelector("#account-dialog").close();
+      });
+    });
+
+    document.querySelector("#account-dialog").addEventListener("close", function () {
+      document.querySelector("#account-form").reset();
+      document.querySelector("#account-dialog-error").textContent = "";
+    });
+
+    // Form masuk hanya memvalidasi nama pengguna dan keberadaan kata sandi demo.
+    const loginForm = document.querySelector("#account-form");
+    if (loginForm) {
+      loginForm.addEventListener("submit", function (event) {
+        event.preventDefault();
+        const username = document.querySelector("#account-username").value.trim();
+        const password = document.querySelector("#account-password").value;
+        const errorNode = document.querySelector("#account-dialog-error");
+        if (!/^[A-Za-z0-9_]{3,20}$/.test(username)) {
+          errorNode.textContent = "Nama pengguna harus 3–20 karakter: huruf, angka, atau garis bawah.";
+          return;
+        }
+        if (!password) {
+          errorNode.textContent = "Isi kata sandi demo agar dapat melanjutkan. Kata sandi tidak akan disimpan.";
+          return;
+        }
+        const previous = read(accountKey("arsipPusaka:user", username), null);
+        const session = { username: username, joinedAt: previous && previous.joinedAt ? previous.joinedAt : new Date().toISOString() };
+        if (!write(accountKey("arsipPusaka:user", username), session)) return;
+        if (!write(SESSION_KEY, session)) return;
+        loginForm.reset();
+        updateAccountControls();
+        document.querySelector("#account-dialog").close();
+        notify("Berhasil masuk sebagai @" + username + ". Akun ini hanya tersimpan di browser.", "success");
+      });
+    }
+
+    document.querySelectorAll("[data-open-login]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        if (!getSession()) accountDialog(true);
+      });
+    });
+
+    document.addEventListener("click", function (event) {
+      const loginLink = event.target.closest("a[href='#masuk']");
+      if (!loginLink) return;
+      event.preventDefault();
+      accountDialog(true);
+    });
+
+    updateAccountControls();
+    initChatbot();
+  }
+
+  document.addEventListener("DOMContentLoaded", initApp);
+
+  // API bersama yang digunakan oleh skrip tiap halaman.
+  window.ARSIP_APP = {
+    read: read,
+    write: write,
+    accountKey: accountKey,
+    getSession: getSession,
+    requireAccount: requireAccount,
+    confirm: askConfirm,
+    notify: notify,
+    formatDate: function (value) {
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? "Tanggal tidak tersedia" : new Intl.DateTimeFormat("id-ID", { day: "numeric", month: "short", year: "numeric" }).format(date);
+    },
+    formatTime: function (seconds) {
+      const safeSeconds = Math.max(0, Math.floor(Number(seconds) || 0));
+      return String(Math.floor(safeSeconds / 60)).padStart(2, "0") + ":" + String(safeSeconds % 60).padStart(2, "0");
+    }
+  };
+})();
